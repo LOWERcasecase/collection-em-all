@@ -810,6 +810,8 @@ function typeOptions(sel){ return `<option value="">All types</option><optgroup 
 function matchRT(r,rar,typ){ if(rar!==''&&rar!=null&&String(r[3])!==String(rar)) return false;
   if(typ){ if(typ.startsWith('t:')){ if(T.sup[r[4]]!=='Pokémon'||T.typ[r[6]]!==typ.slice(2)) return false; } else if(T.sup[r[4]]!==typ.slice(2)) return false; }
   return true; }
+function nowRecorded(e){ const part=(k,nm)=>{ const r=e[IX.r[k]]||0, s=e[IX.s[k]]||0; if(!r&&!s) return `<span style="color:#999">${nm}: none</span>`; return `<span class="loc loc-${k}">${nm}</span> ${[r?`<span class="vb on">R</span>×${r}`:'', s?`<span class="vb sp on">RH</span>×${s}`:''].filter(Boolean).join(' ')}`; };
+  return part('binder','Binder')+'<br>'+part('bulk','Bulk'); }
 function pullOf(e){ if(!e) return {r:0,s:0}; return {r:(!(e[0]>0)&&e[1]>0)?1:0, s:(!(e[3]>0)&&e[4]>0)?1:0}; }
 function pullCount(){ let n=0; for(const s of T.sets){ const o=S.owned[s.id]; if(!o) continue; for(const k in o){ const p=pullOf(o[k]); n+=p.r+p.s; } } return n; }
 let findQ='', findLoc='all', findOpen={}, findRar='', findTyp='';
@@ -834,7 +836,7 @@ function viewFind(el){
         if(rows.length) exp.push({s,rows,n,byL}); }
       if(!exp.length) return;
       const sc=exp.reduce((a,x)=>a+x.n,0), sr=exp.reduce((a,x)=>a+x.rows.length,0); cards+=sr; copies+=sc;
-      const cols=L&&!PULL?6:7;
+      const cols=PULL?7:L?6:7;
       html.push(`<h2 id="fser${si}">${esc(ser)} <span style="font-size:13px;color:#666;font-family:'Open Sans',sans-serif">${sr} card${sr===1?'':'s'} · ${sc} ${PULL?'to move':L?'in '+LN:'in total'}</span></h2>
       <div class="roundy" style="${styleVars(ser)}"><table>
         <tr><th class="hide-m">Symbol</th><th class="hide-m">Logo</th><th>Expansion</th><th class="hide-m">Code</th><th>Cards</th><th>${PULL?'To move':'#'}</th>${L&&!PULL?'':'<th>'+(PULL?'Binder':'Where')+'</th>'}</tr>
@@ -847,11 +849,11 @@ function viewFind(el){
             <td class="c">${x.rows.length}</td><td class="c"><b>${x.n}</b></td>
             ${PULL? `<td style="font-size:12px">${bindersForSet(x.s.id).map(b=>esc(b.name)).join(', ')||'<span style="color:#999">No binder yet</span>'}</td>` : L?'':`<td>${LOCS.filter(([k])=>x.byL[k]).map(([k,nm])=>`<span class="loc loc-${k}">${nm} ×${x.byL[k]}</span>`).join(' ')}</td>`}</tr>
           <tr class="fexp-cards" ${open?'':'hidden'}><td colspan="${cols}" style="padding:0 0 6px 18px;background:#fbfbfd">
-            <table class="inner"><tr><th>No.</th><th>Card</th><th>${PULL?'To move':'#'}</th><th class="hide-m">Type</th><th class="hide-m">Rarity</th><th>Version${PULL?' to move':''}</th>${PULL?'<th>Binder</th>':L?'':'<th>Where</th>'}</tr>${x.rows.join('')}</table>
+            <table class="inner"><tr><th>No.</th><th>Card</th><th>${PULL?'To move':'#'}</th><th class="hide-m">Type</th><th class="hide-m">Rarity</th><th>Version${PULL?' to move':''}</th>${PULL?'<th>Recorded now</th><th>Binder</th>':L?'':'<th>Where</th>'}</tr>${x.rows.join('')}</table>
             <div style="font-size:12px;padding:4px 2px"><a data-set="${x.s.id}">Open ${esc(x.s.name)} →</a></div></td></tr>`; }).join('')}
       </table></div>`);
     });
-    document.getElementById('fres').innerHTML = cards? (PULL? `<p><b>${copies}</b> card${copies===1?'':'s'} to move from bulk into a binder. Each one has a copy in bulk but none of that version in the binder. Tap an expansion to see them, or open the expansion to update its counts once you've moved them.</p>` : `<p>${cards} card${cards===1?'':'s'} (${copies} ${L?'in '+LN:'in total'}). Tap an expansion to see its cards.</p>`)+html.join('')
+    document.getElementById('fres').innerHTML = cards? (PULL? `<p><b>${copies}</b> card${copies===1?'':'s'} to move from bulk into a binder. The binder gets 1 regular and 1 reverse holo (or holo / 2nd copy) of each card first; anything listed here has that version sitting in bulk while its binder pocket is still empty. Tap an expansion to see them, or open the expansion to update its counts once you've moved them.</p>` : `<p>${cards} card${cards===1?'':'s'} (${copies} ${L?'in '+LN:'in total'}). Tap an expansion to see its cards.</p>`)+html.join('')
       : PULL? '<p><span class="tag ok">All caught up</span> Every card you have in bulk already has that version in the binder.</p>' : `<p>${t.have?'Nothing you own matches.':'You haven\'t marked any cards as owned yet. Open an <a data-go="expansions">expansion</a> to start.'}</p>`;
     document.querySelectorAll('#fres tr.fexp-row').forEach(tr=>tr.onclick=e=>{ if(e.target.closest('a')) return; const id=tr.dataset.fset; const open=!tr.classList.contains('open');
       tr.classList.toggle('open',open); tr.nextElementSibling.hidden=!open; tr.querySelector('.fx').textContent=open?'▾':'▸'; if(!findQ.trim()&&findRar===''&&!findTyp) findOpen[id]=open; });
@@ -869,7 +871,7 @@ function findRow(s,r,e,L,n,PULL){
   if(PULL){ const pp=pullOf(e); vr=pp.r?1:0; vs=pp.s?1:0; }
   const ver=PULL? [vr?'<span class="vb on">R</span> Regular':'', vs?'<span class="vb sp on">RH</span> Reverse holo':''].filter(Boolean).join('<br>') : `${vr?`<span class="vb on">R</span>${vr>1?'×'+vr:''} `:''}${vs?`<span class="vb sp on">RH</span>${vs>1?'×'+vs:''}`:''}`;
   const binders=PULL? bindersForSet(s.id) : [];
-  if(PULL) return `<tr><td class="c nw">${esc(r[1])}</td><td><b>${esc(r[2])}</b></td><td class="c"><b>${n}</b></td><td class="hide-m nw" style="font-size:12px">${T.sup[r[4]]==='Pokémon'? typeDot(T.typ[r[6]]||'')+esc(T.typ[r[6]]||'') : esc(T.sup[r[4]]||'')}</td><td class="hide-m" style="font-size:12px">${esc(rarLabel(T.rar[r[3]]||''))}</td><td style="font-size:12px">${ver}</td><td style="font-size:12px">${binders.length? binders.map(b=>`<a data-go="view-${b.id}">${esc(b.name)}</a>`).join(', ') : '<span style="color:#999">No binder yet</span>'}</td></tr>`;
+  if(PULL) return `<tr><td class="c nw">${esc(r[1])}</td><td><b>${esc(r[2])}</b></td><td class="c"><b>${n}</b></td><td class="hide-m nw" style="font-size:12px">${T.sup[r[4]]==='Pokémon'? typeDot(T.typ[r[6]]||'')+esc(T.typ[r[6]]||'') : esc(T.sup[r[4]]||'')}</td><td class="hide-m" style="font-size:12px">${esc(rarLabel(T.rar[r[3]]||''))}</td><td style="font-size:12px">${ver}</td><td style="font-size:12px;white-space:nowrap">${nowRecorded(e)}</td><td style="font-size:12px">${binders.length? binders.map(b=>`<a data-go="view-${b.id}">${esc(b.name)}</a>`).join(', ') : '<span style="color:#999">No binder yet</span>'}</td></tr>`;
   const where=L?'':`<td>${locsOf(e).map(([k,nm])=>`<span class="loc loc-${k}">${nm} ×${locN(e,k)}</span>`).join(' ')}</td>`;
   const sup=T.sup[r[4]]||'', ty=T.typ[r[6]]||'';
   return `<tr><td class="c nw">${esc(r[1])}</td><td><b>${esc(r[2])}</b></td><td class="c"><b>${n}</b></td><td class="hide-m nw" style="font-size:12px">${sup==='Pokémon'? typeDot(ty)+esc(ty) : esc(sup)}</td><td class="hide-m" style="font-size:12px">${esc(rarLabel(T.rar[r[3]]||''))}</td><td class="nw" style="font-size:12px">${ver}</td>${where}</tr>`;
