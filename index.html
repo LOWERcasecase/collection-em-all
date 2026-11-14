@@ -563,39 +563,84 @@ function pricesAllowed(){ return !(window.claude&&window.claude.use); }
 function subsetIds(setId){ const ids=new Set([setId]); (T.cards[setId]||[]).forEach(r=>{ const i=r[0].indexOf('-'); if(i>0) ids.add(r[0].slice(0,i)); }); return [...ids]; }
 function pick(o,...ks){ for(const k of ks){ if(o&&o[k]) return o[k]; } return null; }
 function tcgPrice(v){ return v? (v.market ?? v.mid ?? v.low ?? null) : null; }
-async function fetchSetPrices(setId){
+// Provider 1: pokemontcg.io (same ids as our card list, one request per expansion)
+let PTCG_DOWN=false;
+async function fetchSetPricesPTCG(setId){
   const out={};
   for(const sid of subsetIds(setId)){
     let page=1;
     for(;;){
-      const url=`https://api.pokemontcg.io/v2/cards?q=set.id:${encodeURIComponent(sid)}&pageSize=250&page=${page}&select=id,number,tcgplayer,cardmarket`;
-      const res=await fetch(url); if(res.status===429) throw new Error('The price service is busy (too many requests). Wait a minute and try again.');
-      if(!res.ok) throw new Error('Price service error '+res.status);
+      const res=await fetch(`https://api.pokemontcg.io/v2/cards?q=set.id:${encodeURIComponent(sid)}&pageSize=250&page=${page}`);
+      if(!res.ok) throw new Error('pokemontcg.io '+res.status);
       const j=await res.json();
       (j.data||[]).forEach(c=>{
         const key= sid===setId? c.id.slice(c.id.indexOf('-')+1) : c.id;
         const tp=(c.tcgplayer||{}).prices||{}, cm=(c.cardmarket||{}).prices||{};
         const reg=pick(tp,'normal','holofoil','1stEditionNormal','1stEditionHolofoil','unlimitedHolofoil','unlimited');
         const rev=pick(tp,'reverseHolofoil');
-        const tR=tcgPrice(reg), tS=rev? tcgPrice(rev) : tcgPrice(pick(tp,'holofoil'))??tR;
+        const tR=tcgPrice(reg), tS=rev? tcgPrice(rev) : (tcgPrice(pick(tp,'holofoil'))??tR);
         const cR=cm.trendPrice ?? cm.averageSellPrice ?? null, cS=cm.reverseHoloTrend ?? cm.reverseHoloSell ?? cR;
         out[key]=[tR,tS,cR,cS,(c.tcgplayer||{}).url||'',(c.cardmarket||{}).url||''];
       });
       if(!j.totalCount || page*250>=j.totalCount) break; page++;
     }
   }
-  PRICES[setId]={t:Date.now(),c:out}; savePrices(); return out;
+  PRICES[setId]={t:Date.now(),c:out,src:'ptcg'}; savePrices();
 }
-let priceQueue=Promise.resolve(), priceBusy=false;
-async function ensurePrices(setIds,onProgress){
-  const need=setIds.filter(id=>!PRICES[id]||Date.now()-PRICES[id].t>PRICE_TTL);
-  let done=0, err=null;
-  for(const id of need){
-    try{ await fetchSetPrices(id); }catch(e){ err=e; break; }
-    done++; onProgress&&onProgress(done,need.length,SETS[id].name);
-    if(done<need.length) await new Promise(r=>setTimeout(r,2100)); // stay under the free limit of 30 requests a minute
+// Provider 2: TCGdex (free, no key). Its expansion ids differ (sv3pt5 -> sv03.5), so we look each set up once and remember the card ids.
+const TDX='https://api.tcgdex.net/v2/en';
+let TDXMAP={}; try{ TDXMAP=JSON.parse(localStorage.getItem('collectapedia.tdxmap.v1')||'{}'); }catch(e){}
+function saveTdxMap(){ try{ localStorage.setItem('collectapedia.tdxmap.v1',JSON.stringify(TDXMAP)); }catch(e){} }
+function tdxCandidates(sid){
+  const c=[]; const m=/^([a-z]+)(\d+)(pt5)?(.*)$/i.exec(sid);
+  if(m){ const [,p,n,half,rest]=m; const pad=n.padStart(2,'0');
+    c.push(`${p}${pad}${half?'.5':''}${rest}`, `${p}${n}${half?'.5':''}${rest}`); }
+  c.push(sid.replace('pt5','.5'), sid);
+  return [...new Set(c)];
+}
+async function tdxJSON(url){ const r=await fetch(url); if(r.status===404) return null; if(!r.ok) throw new Error('TCGdex '+r.status); return r.json(); }
+async function tdxMapSet(setId){
+  if(TDXMAP[setId]) return TDXMAP[setId];
+  const map={}; const rowsBySid={};
+  (T.cards[setId]||[]).forEach(r=>{ const i=r[0].indexOf('-'); const sid=i>0?r[0].slice(0,i):setId; (rowsBySid[sid]=rowsBySid[sid]||[]).push(r); });
+  for(const sid of Object.keys(rowsBySid)){
+    let set=null; for(const cand of tdxCandidates(sid)){ set=await tdxJSON(`${TDX}/sets/${encodeURIComponent(cand)}`); if(set&&set.cards) break; }
+    if(!set||!set.cards) continue;
+    const byNum={}; set.cards.forEach(c=>{ byNum[normNum(c.localId)]=c.id; });
+    rowsBySid[sid].forEach(r=>{ const id=byNum[normNum(r[1])]; if(id) map[r[0]]=id; });
   }
-  return {fetched:done,total:need.length,err};
+  TDXMAP[setId]=map; saveTdxMap(); return map;
+}
+function tdxPrice(card){
+  const p=card&&card.pricing||{}; const tp=p.tcgplayer||{}, cm=p.cardmarket||{};
+  const mk=v=>v? (v.marketPrice ?? v.midPrice ?? v.lowPrice ?? null) : null;
+  const regKey=['normal','holofoil','holo','1st-edition','1st-edition-holofoil','unlimited'].find(k=>tp[k]);
+  const tR=mk(tp[regKey]); const tS=tp.reverse||tp['reverse-holofoil']? mk(tp.reverse||tp['reverse-holofoil']) : (mk(tp.holofoil||tp.holo)??tR);
+  const cR=cm.trend ?? cm.avg ?? null, cS=cm['trend-holo'] ?? cm['avg-holo'] ?? cR;
+  return [tR,tS,cR,cS,'',''];
+}
+async function fetchCardsTDX(setId,keys,onCard){
+  const map=await tdxMapSet(setId);
+  const P=PRICES[setId] && PRICES[setId].src==='tdx' && Date.now()-PRICES[setId].t<PRICE_TTL ? PRICES[setId] : (PRICES[setId]={t:Date.now(),c:{},src:'tdx'});
+  const todo=keys.filter(k=>!(k in P.c));
+  let i=0; const worker=async()=>{ while(i<todo.length){ const k=todo[i++]; const id=map[k];
+      if(!id){ P.c[k]=[null,null,null,null,'','']; onCard&&onCard(); continue; }
+      try{ const card=await tdxJSON(`${TDX}/cards/${encodeURIComponent(id)}`); P.c[k]=tdxPrice(card); }catch(e){ /* leave unpriced, retry next load */ }
+      onCard&&onCard(); } };
+  await Promise.all([1,2,3,4,5,6].map(worker)); savePrices();
+}
+let priceBusy=false;
+// wanted = [{setId, keys:[cardKey,...]}]
+async function ensurePrices(wanted,onProgress){
+  const total=wanted.reduce((a,w)=>a+w.keys.length,0); let done=0, err=null;
+  for(const w of wanted){
+    const fresh=PRICES[w.setId]&&Date.now()-PRICES[w.setId].t<PRICE_TTL;
+    if(fresh && (PRICES[w.setId].src==='ptcg' || w.keys.every(k=>k in PRICES[w.setId].c))){ done+=w.keys.length; onProgress&&onProgress(done,total,SETS[w.setId].name); continue; }
+    if(!PTCG_DOWN){ try{ await fetchSetPricesPTCG(w.setId); done+=w.keys.length; onProgress&&onProgress(done,total,SETS[w.setId].name); await new Promise(r=>setTimeout(r,2100)); continue; }catch(e){ PTCG_DOWN=true; } }
+    try{ await fetchCardsTDX(w.setId,w.keys,()=>{ done++; onProgress&&onProgress(done,total,SETS[w.setId].name); }); }
+    catch(e){ err=e; break; }
+  }
+  return {err,total};
 }
 function priceOf(setId,key,v){ const p=(PRICES[setId]||{}).c; const x=p&&p[key]; if(!x) return [null,null]; return v==='s'? [x[1],x[3]] : [x[0],x[2]]; }
 function money(n,cur){ if(n==null||isNaN(n)) return '<span style="color:#bbb">—</span>'; return (cur==='EUR'?'€':'$')+Number(n).toFixed(2); }
@@ -619,6 +664,9 @@ function viewPrices(el){
   <div id="prRes"></div>`;
   const status=t=>{ document.getElementById('prStatus').innerHTML=t; };
   const scopeSets=()=> prScope? [SETS[prScope]] : started;
+  // cards whose price the current mode needs
+  const wantedKeys=setId=>{ const o=ownedOf(setId); return T.cards[setId].filter(r=>{ const e=o[r[0]];
+      if(prMode==='sell') return e&&(e[1]||e[4]); if(prMode==='buy') return !regN(e)||!spN(e); return qn(e)>0; }).map(r=>r[0]); };
   const render=()=>{
     const sets=scopeSets(); const blocks=[]; let totT=0,totC=0,count=0, missingPrices=0;
     T.series.forEach((ser,si)=>{
@@ -640,7 +688,7 @@ function viewPrices(el){
       blocks.push(`<h2>${esc(ser)}</h2><div class="roundy" style="${styleVars(ser)}"><table>
         <tr><th class="hide-m">Logo</th><th>Expansion</th><th>Cards</th><th>TCGplayer</th><th>Cardmarket</th></tr>
         ${ex.map(x=>{ const open=!!prScope||!!prOpen[x.s.id];
-          return `<tr class="fexp-row ${open?'open':''}" data-pset="${x.s.id}" style="cursor:pointer"><td class="c hide-m">${imgTag(x.s.id,'logo',null,'max-height:28px;max-width:100px')}</td><td><span class="fx">${open?'▾':'▸'}</span> <b>${esc(x.s.name)}</b>${PRICES[x.s.id]?'':' <span class="tag mute">no prices loaded</span>'}</td><td class="c">${x.rows.reduce((a,y)=>a+y.q,0)}</td><td class="c"><b>${money(x.st,'USD')}</b></td><td class="c"><b>${money(x.sc,'EUR')}</b></td></tr>
+          return `<tr class="fexp-row ${open?'open':''}" data-pset="${x.s.id}" style="cursor:pointer"><td class="c hide-m">${imgTag(x.s.id,'logo',null,'max-height:28px;max-width:100px')}</td><td><span class="fx">${open?'▾':'▸'}</span> <b>${esc(x.s.name)}</b>${PRICES[x.s.id]&&Object.keys(PRICES[x.s.id].c).length?'':' <span class="tag mute">no prices loaded</span>'}</td><td class="c">${x.rows.reduce((a,y)=>a+y.q,0)}</td><td class="c"><b>${money(x.st,'USD')}</b></td><td class="c"><b>${money(x.sc,'EUR')}</b></td></tr>
           <tr ${open?'':'hidden'}><td colspan="5" style="padding:0 0 6px 18px;background:#fbfbfd"><table class="inner"><tr><th>No.</th><th>Card</th><th>Version</th><th>${prMode==='buy'?'Need':'Qty'}</th><th>TCGplayer</th><th>Cardmarket</th><th class="hide-m">Rarity</th><th>Compare</th></tr>
           ${x.rows.map(y=>`<tr><td class="c nw">${esc(y.r[1])}</td><td><div style="display:flex;align-items:center;gap:6px">${imgTag(x.s.id,'card',y.r[0],'height:30px;border-radius:2px')}<b>${esc(y.r[2])}</b></div></td><td class="nw">${y.v==='r'?'<span class="vb on">R</span> Regular':'<span class="vb sp on">RH</span> Reverse holo'}</td><td class="c">${y.q}</td><td class="c nw">${money(y.pt,'USD')}${y.q>1&&y.pt?`<div style="font-size:11px;color:#777">${money(y.pt*y.q,'USD')} total</div>`:''}</td><td class="c nw">${money(y.pc,'EUR')}${y.q>1&&y.pc?`<div style="font-size:11px;color:#777">${money(y.pc*y.q,'EUR')} total</div>`:''}</td><td class="hide-m" style="font-size:12px">${esc(rarLabel(T.rar[y.r[3]]||''))}</td><td style="font-size:11.5px">${shopLinks(x.s,y.r,x.s.id,y.r[0])}</td></tr>`).join('')}</table></td></tr>`; }).join('')}
       </table></div>`);
@@ -655,18 +703,18 @@ function viewPrices(el){
   };
   const load=async()=>{
     if(!pricesAllowed()||priceBusy) return; priceBusy=true; const btn=document.getElementById('prLoad'); if(btn) btn.disabled=true;
-    const ids=scopeSets().map(s=>s.id);
-    const r=await ensurePrices(ids,(d,n,name)=>{ status(`Loading prices… ${d} of ${n} (${esc(name)})`); });
+    const wanted=scopeSets().map(s=>({setId:s.id,keys:wantedKeys(s.id)})).filter(w=>w.keys.length);
+    const r=await ensurePrices(wanted,(d,n,name)=>{ status(`Loading prices… ${d} of ${n} cards (${esc(name)})`); });
     priceBusy=false; if(btn&&btn.isConnected) btn.disabled=false;
-    if(curView==='prices'){ render(); if(r.err) status(`<span style="color:var(--bad)">${esc(r.err.message||'Could not load prices.')}</span> ${r.fetched?`Loaded ${r.fetched} of ${r.total}.`:''}`); else if(r.total) status(`Loaded prices for ${r.total} expansion${r.total===1?'':'s'}.`); }
+    if(curView==='prices'){ render(); if(r.err) status(`<span style="color:var(--bad)">Could not load prices (${esc(r.err.message||'error')}). Check your connection and press Load / refresh prices again; the shop links still work.</span>`); else status(`Prices loaded${PTCG_DOWN?' from TCGdex':''}. They refresh after 24 hours.`); }
   };
-  el.querySelector('#prMode').onclick=e=>{ const b=e.target.closest('[data-m]'); if(!b) return; prMode=b.dataset.m; el.querySelectorAll('#prMode .seg').forEach(x=>x.classList.toggle('on',x===b)); render(); };
+  el.querySelector('#prMode').onclick=e=>{ const b=e.target.closest('[data-m]'); if(!b) return; prMode=b.dataset.m; el.querySelectorAll('#prMode .seg').forEach(x=>x.classList.toggle('on',x===b)); render(); if(pricesAllowed()) load(); };
   el.querySelector('#prScope').onchange=e=>{ prScope=e.target.value; render(); if(pricesAllowed()) load(); };
   el.querySelector('#prSort').onchange=e=>{ prSort=e.target.value; render(); };
   el.querySelector('#prMin').onchange=e=>{ prMin=+e.target.value; render(); };
-  el.querySelector('#prLoad').onclick=()=>{ scopeSets().forEach(s=>{ if(PRICES[s.id]) PRICES[s.id].t=0; }); load(); };
+  el.querySelector('#prLoad').onclick=()=>{ scopeSets().forEach(s=>{ delete PRICES[s.id]; }); PTCG_DOWN=false; load(); };
   render();
-  if(pricesAllowed() && scopeSets().some(s=>!PRICES[s.id])) load();
+  if(pricesAllowed()) load();
 }
 
 /* ---------- Main page charts ---------- */
